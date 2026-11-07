@@ -159,22 +159,65 @@ def bind_arbol(widget, evento, fn):
 class Desplazable(tk.Frame):
     """Frame con scroll vertical (rueda del ratón incluida)."""
 
-    def __init__(self, master, bg=BG, **kw):
+    def __init__(self, master, bg=BG, llenar=False, **kw):
+        """
+        llenar=True: se usa para páginas enteras. Si la ventana es grande, el contenido
+        ocupa todo el alto; si es pequeña, aparece la barra y puedes bajar.
+        """
         super().__init__(master, bg=bg, **kw)
+        self.llenar = llenar
         self.cv = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0)
         self.sb = ttk.Scrollbar(self, orient="vertical", command=self.cv.yview)
         self.dentro = tk.Frame(self.cv, bg=bg)
         self.win = self.cv.create_window(0, 0, window=self.dentro, anchor="nw")
         self.cv.configure(yscrollcommand=self.sb.set)
-        self.cv.pack(side="left", fill="both", expand=True)
         self.sb.pack(side="right", fill="y")
-        self.dentro.bind("<Configure>", lambda e: self.cv.configure(scrollregion=self.cv.bbox("all")))
-        self.cv.bind("<Configure>", lambda e: self.cv.itemconfigure(self.win, width=e.width))
+        self.cv.pack(side="left", fill="both", expand=True)
+        self._barra = True
+        self._ult = None
+        self.dentro.bind("<Configure>", lambda e: self._ajustar())
+        self.cv.bind("<Configure>", lambda e: self._ajustar())
+        if llenar:
+            self.after(400, self._vigilar_tam)
+
+    def _ajustar(self):
+        w, h = self.cv.winfo_width(), self.cv.winfo_height()
+        req = self.dentro.winfo_reqheight()
+        alto = max(h, req) if self.llenar else req
+        estado = (w, h, req)
+        if estado == self._ult:
+            return
+        self._ult = estado
+        if self.llenar:
+            self.cv.itemconfigure(self.win, width=w, height=alto)
+        else:
+            self.cv.itemconfigure(self.win, width=w)
+        self.cv.configure(scrollregion=(0, 0, w, alto))
+        hace_falta = req > h + 2
+        if hace_falta != self._barra:
+            self._barra = hace_falta
+            if hace_falta:
+                self.sb.pack(side="right", fill="y", before=self.cv)
+            else:
+                self.sb.pack_forget()
+                self.cv.yview_moveto(0)
+
+    def _vigilar_tam(self):
+        # el contenido de la página cambia (resultados, tarjetas…): reajusta el alto
+        try:
+            self._ajustar()
+            self.after(400, self._vigilar_tam)
+        except tk.TclError:
+            pass
 
     def rueda(self, e):
-        if self.cv.yview() == (0.0, 1.0):
-            return
-        self.cv.yview_scroll(int(-e.delta / 120) or (-1 if e.delta > 0 else 1), "units")
+        """Devuelve True si ha podido desplazarse."""
+        arriba, abajo = self.cv.yview()
+        sube = e.delta > 0
+        if (sube and arriba <= 0.0) or (not sube and abajo >= 1.0):
+            return False
+        self.cv.yview_scroll(int(-e.delta / 120) or (-1 if sube else 1), "units")
+        return True
 
 
 def dibujar_sello(cv, x, y, w, h, cent, cantidad=None, fondo=CARD, apagado=False):
@@ -216,8 +259,7 @@ class App(tk.Tk):
         super().__init__()
         self.title(APP)
         self.k = max(1.0, self.winfo_fpixels("1i") / 96.0)
-        self.geometry(f"{self.S(1200)}x{self.S(780)}")
-        self.minsize(self.S(1000), self.S(660))
+        self._autoescala()
         self.configure(bg=BG)
         try:
             self._icono = tk.PhotoImage(data=ICONO_B64)
@@ -267,10 +309,26 @@ class App(tk.Tk):
     def _rueda_global(self, e):
         w = self.winfo_containing(e.x_root, e.y_root)
         while w is not None:
-            if isinstance(w, Desplazable):
-                w.rueda(e)
-                return
+            if isinstance(w, Desplazable) and w.rueda(e):
+                return          # si esta lista ya no puede bajar más, se mueve la página
             w = w.master
+
+    def _autoescala(self):
+        """Ajusta el tamaño de todo para que quepa en tu pantalla sin maximizar."""
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        disp_w, disp_h = sw * 0.94, sh * 0.88          # deja sitio a la barra de tareas
+        f = min(1.0, disp_w / self.S(1220), disp_h / self.S(820))
+        f = max(0.62, f)
+        if f < 0.999:
+            self.k *= f
+            try:
+                self.tk.call("tk", "scaling", float(self.tk.call("tk", "scaling")) * f)
+            except tk.TclError:
+                pass
+        w, h = min(self.S(1220), int(disp_w)), min(self.S(820), int(disp_h))
+        x, y = max(0, (sw - w) // 2), max(0, int((sh - h) * 0.4))
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.minsize(min(self.S(760), w), min(self.S(480), h))
 
     def S(self, px):
         return int(px * self.k)
@@ -376,7 +434,8 @@ class App(tk.Tk):
 
     # ---------------------------------------------------------- ENVIAR ---
     def _pag_enviar(self):
-        pag = tk.Frame(self.cuerpo, bg=BG)
+        marco = Desplazable(self.cuerpo, llenar=True)
+        pag = marco.dentro
         top = tk.Frame(pag, bg=BG)
         top.pack(fill="x")
         izq = tk.Frame(top, bg=BG)
@@ -435,7 +494,7 @@ class App(tk.Tk):
         self.b_otra.pack(side="left", padx=10)
         self.b_desh = Boton(acc, "↶  Deshacer último envío", self.deshacer_ultimo, "fantasma", tam=10, pady=10)
         self.b_desh.pack(side="right")
-        return pag
+        return marco
 
     def _construir_cards(self):
         for w in self.grid_t.winfo_children():
@@ -628,7 +687,8 @@ class App(tk.Tk):
 
     # ---------------------------------------------------------- SELLOS ---
     def _pag_sellos(self):
-        pag = tk.Frame(self.cuerpo, bg=BG)
+        marco = Desplazable(self.cuerpo, llenar=True)
+        pag = marco.dentro
         top = tk.Frame(pag, bg=BG)
         top.pack(fill="x")
         izq = tk.Frame(top, bg=BG)
@@ -667,7 +727,7 @@ class App(tk.Tk):
 
         self.lista = Desplazable(pag)
         self.lista.pack(fill="both", expand=True, padx=34, pady=(4, 24))
-        return pag
+        return marco
 
     def _pintar_sellos(self):
         try:
@@ -752,7 +812,8 @@ class App(tk.Tk):
 
     # --------------------------------------------------------- CUÁNTOS ---
     def _pag_cuantos(self):
-        pag = tk.Frame(self.cuerpo, bg=BG)
+        marco = Desplazable(self.cuerpo, llenar=True)
+        pag = marco.dentro
         self._cabecera(pag, "¿Cuántos envíos puedo hacer?",
                        "Cada tarifa calculada por separado, como si todos tus sellos fueran para ella.\n"
                        "Pulsa la que te interese para ver cómo repartirlos. Se recalcula solo cuando cambias tus sellos.")
@@ -773,7 +834,7 @@ class App(tk.Tk):
         self.lbl_det_sub.pack(fill="x", padx=22)
         self.lista_plan = Desplazable(det, bg=CARD)
         self.lista_plan.pack(fill="both", expand=True, padx=16, pady=(8, 14))
-        return pag
+        return marco
 
     def _construir_ccards(self):
         for w in self.grid_c.winfo_children():
@@ -936,7 +997,8 @@ class App(tk.Tk):
 
     # ------------------------------------------------------- HISTORIAL ---
     def _pag_historial(self):
-        pag = tk.Frame(self.cuerpo, bg=BG)
+        marco = Desplazable(self.cuerpo, llenar=True)
+        pag = marco.dentro
         self._cabecera(pag, "Historial de envíos", "Cada vez que descuentas sellos queda apuntado aquí y en la hoja «Historial» del Excel.")
         marco = tk.Frame(pag, bg=CARD, highlightthickness=1, highlightbackground=LINEA)
         marco.pack(fill="both", expand=True, padx=34, pady=(0, 24))
@@ -949,7 +1011,7 @@ class App(tk.Tk):
         self.tree.configure(yscrollcommand=sb.set)
         self.tree.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=10)
         sb.pack(side="right", fill="y", pady=10)
-        return pag
+        return marco
 
     def _pintar_historial(self):
         self.tree.delete(*self.tree.get_children())

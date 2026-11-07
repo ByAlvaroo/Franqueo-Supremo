@@ -1,0 +1,8 @@
+# Tus sellos se quedan en tu PC, no se suben
+*.xlsx
+codigo/build_info.json
+build/
+dist/
+*.spec
+__pycache__/
+*.exe
